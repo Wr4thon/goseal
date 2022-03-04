@@ -15,6 +15,14 @@ import (
 
 func main() {
 	app := &cli.App{
+		Flags: []cli.Flag{
+			&cli.StringFlag{
+				Name: "config",
+				Aliases: []string{
+					"c",
+				},
+			},
+		},
 		Name:    "goseal",
 		Usage:   "Used to automatically generate kubernetes secret files (and optionally seal them)",
 		Version: "v0.2.0",
@@ -40,6 +48,34 @@ func main() {
 					Aliases:  []string{"k"},
 					Required: true,
 				}),
+			},
+			{
+				Name:        "config",
+				HelpName:    "config",
+				Description: "read, write or edit the configuration",
+				Usage:       "read, write or edit the configuration",
+				Aliases: []string{
+					"c",
+				},
+				Flags: []cli.Flag{
+					&cli.BoolFlag{
+						Name: "global",
+						Aliases: []string{
+							"g",
+						},
+						Value: false,
+					},
+				},
+				Subcommands: []*cli.Command{
+					{
+						Name:   "print",
+						Action: PrintConfig,
+					},
+					// {
+					// 	Name:   "add",
+					// 	Action: AddConfig,
+					// },
+				},
 			},
 		},
 	}
@@ -78,6 +114,11 @@ func getStandardFlags() []cli.Flag {
 			Usage:   "if set, will run kubeseal with given cert",
 			Aliases: []string{"c"},
 		},
+		&cli.StringFlag{
+			Name:    "out",
+			Usage:   "destination file",
+			Aliases: []string{"o"},
+		},
 	}
 }
 
@@ -90,6 +131,11 @@ func Yaml(c *cli.Context) error {
 	namespace := c.String("namespace")
 	secretName := c.String("secret-name")
 	certPath := c.String("cert")
+	outFilenamePath := c.String("out")
+
+	if err := handleConfig(c, &outFilenamePath, &certPath); err != nil {
+		return err
+	}
 
 	file, err := os.ReadFile(filePath)
 	if err != nil {
@@ -106,11 +152,31 @@ func Yaml(c *cli.Context) error {
 		return err
 	}
 
-	if certPath != "" {
-		return sealSecret(secrets, secretName, namespace, certPath)
+	if err := ensureDirForFile(outFilenamePath); err != nil {
+		return err
 	}
 
-	return createSecret(secrets, secretName, namespace)
+	if certPath != "" {
+		return sealSecret(secrets, secretName, namespace, certPath, outFilenamePath)
+	}
+
+	return createSecret(secrets, secretName, namespace, outFilenamePath)
+}
+
+func handleConfig(c *cli.Context, outPath, certPath *string) error {
+	if c.IsSet("config") {
+		configName := c.String("config")
+		cfg, err := getStageConfigurationByName(c, configName)
+		if err != nil {
+			return err
+		}
+
+		// TODO path join
+		*outPath = cfg.BasePath + "/" + *outPath
+		*certPath = cfg.Cert
+	}
+
+	return nil
 }
 
 // File is a cli command
@@ -120,6 +186,11 @@ func File(c *cli.Context) error {
 	namespace := c.String("namespace")
 	secretName := c.String("secret-name")
 	certPath := c.String("cert")
+	outFilenamePath := c.String("out")
+
+	if err := handleConfig(c, &outFilenamePath, &certPath); err != nil {
+		return err
+	}
 
 	file, err := os.ReadFile(filePath)
 	if err != nil {
@@ -131,16 +202,19 @@ func File(c *cli.Context) error {
 	}
 
 	secrets := map[string]string{secretKey: string(file)}
-
-	if certPath != "" {
-		return sealSecret(secrets, secretName, namespace, certPath)
+	if err := ensureDirForFile(outFilenamePath); err != nil {
+		return err
 	}
 
-	return createSecret(secrets, secretName, namespace)
+	if certPath != "" {
+		return sealSecret(secrets, secretName, namespace, certPath, outFilenamePath)
+	}
+
+	return createSecret(secrets, secretName, namespace, outFilenamePath)
 }
 
 // runs the kubectl create secret command and prints the output to stdout.
-func createSecret(secrets map[string]string, secretName, namespace string) error {
+func createSecret(secrets map[string]string, secretName, namespace, outPath string) error {
 	kubectlCreateSecret := getCreateSecretFileCmd(secrets, secretName, namespace)
 
 	var stdout bytes.Buffer
@@ -150,13 +224,16 @@ func createSecret(secrets map[string]string, secretName, namespace string) error
 		return err
 	}
 
-	fmt.Println(stdout.String())
+	if outPath == "" {
+		fmt.Println(stdout.String())
+		return nil
+	}
 
-	return nil
+	return os.WriteFile(outPath, stdout.Bytes(), os.ModePerm)
 }
 
 // runs the kubectl create secret command, pipes the output to the kubeseal command and prints the output to stdout.
-func sealSecret(secrets map[string]string, secretName, namespace, certPath string) error {
+func sealSecret(secrets map[string]string, secretName, namespace, certPath, outPath string) error {
 	kubectlCreateSecret := getCreateSecretFileCmd(secrets, secretName, namespace)
 	kubeseal := exec.Command("kubeseal", "--format", "yaml", "--cert", certPath)
 
@@ -186,9 +263,12 @@ func sealSecret(secrets map[string]string, secretName, namespace, certPath strin
 		return errors.New(getErrText(err, kubeseal.Args, stderr.String()))
 	}
 
-	fmt.Println(stdout.String())
+	if outPath == "" {
+		fmt.Println(stdout.String())
+		return nil
+	}
 
-	return nil
+	return os.WriteFile(outPath, stdout.Bytes(), os.ModePerm)
 }
 
 // retrieve a printable error text from cmd errors

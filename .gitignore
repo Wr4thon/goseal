@@ -17,3 +17,6 @@
 # editors
 .idea
 .vscode
+
+# config file name
+.goseal
